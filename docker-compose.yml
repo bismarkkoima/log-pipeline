@@ -1,0 +1,119 @@
+# Full pipeline on one machine:
+#   docker compose up -d --build
+#   npm run loadgen -- --rate 10000 --duration 60
+#   open http://localhost:8081   (dashboard)
+#
+# Scale the processing tier:  docker compose up -d --scale worker=4
+
+x-app-env: &app-env
+  KAFKA_BROKERS: redpanda:9092
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_USER: pipeline
+  CLICKHOUSE_PASSWORD: pipeline
+  CLICKHOUSE_DB: logs
+  LOG_LEVEL: info
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1G
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+    ports:
+      - "19092:19092"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_USER: pipeline
+      CLICKHOUSE_PASSWORD: pipeline
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "8123:8123"
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    build: .
+    command: ["node", "scripts/migrate.js"]
+    environment: *app-env
+    depends_on:
+      clickhouse: { condition: service_healthy }
+    restart: "no"
+
+  ingest:
+    build: .
+    command: ["node", "src/ingest/server.js"]
+    environment:
+      <<: *app-env
+      INGEST_API_KEYS: dev-key
+    ports:
+      - "8080:8080"
+    depends_on:
+      redpanda: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["node", "src/worker/index.js"]
+    environment: *app-env
+    depends_on:
+      redpanda: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    deploy:
+      replicas: 2
+    restart: unless-stopped
+
+  query:
+    build: .
+    command: ["node", "src/query/server.js"]
+    environment: *app-env
+    ports:
+      - "8081:8081"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    restart: unless-stopped
+
+  # Optional extras: Kafka UI (topics, consumer lag, DLQ) and Prometheus.
+  console:
+    image: docker.redpanda.com/redpandadata/console:v2.7.2
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    ports:
+      - "8088:8080"
+    depends_on:
+      redpanda: { condition: service_healthy }
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on: [ingest, worker]
+
+volumes:
+  redpanda-data:
+  clickhouse-data:
