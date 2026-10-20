@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Log Pipeline</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #16181d; --muted: #646b78; --border: #e3e6eb;
+    --accent: #2f6fde; --err: #d6453d; --warn: #c98a12; --ok: #1f9d63;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #171a21; --text: #e7e9ee; --muted: #8b93a3; --border: #262b35;
+      --accent: #6b9cff; --err: #f0675f; --warn: #e5ad3a; --ok: #3cc488;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  h1 { font-size: 17px; margin: 0; font-weight: 650; }
+  h1 span { color: var(--muted); font-weight: 400; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; }
+  select, input, button { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; }
+  button { cursor: pointer; background: var(--accent); color: #fff; border-color: var(--accent); }
+  main { padding: 20px; display: grid; gap: 16px; max-width: 1400px; margin: 0 auto; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .kpi, .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .kpi .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .kpi .value { font-size: 26px; font-weight: 650; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .kpi .sub { color: var(--muted); font-size: 12px; }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; }
+  .panel h2 { font-size: 14px; margin: 0 0 10px; font-weight: 600; }
+  .chart { position: relative; height: 240px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td.num, th.num { text-align: right; }
+  .scroll { overflow-x: auto; }
+  .lvl { font-family: var(--mono); font-size: 12px; font-weight: 600; }
+  .lvl-error, .lvl-fatal { color: var(--err); } .lvl-warn { color: var(--warn); } .lvl-info { color: var(--ok); } .lvl-debug { color: var(--muted); }
+  .msg { font-family: var(--mono); font-size: 12px; white-space: normal; word-break: break-word; min-width: 280px; }
+  .search { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .search input[name=q] { flex: 1; min-width: 180px; }
+  .bad { color: var(--err); }
+  .empty { color: var(--muted); padding: 16px 8px; }
+  @media (max-width: 520px) { .grid2 { grid-template-columns: 1fr; } main { padding: 12px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Log Pipeline <span>· live analytics</span></h1>
+  <div class="controls">
+    <select id="window" aria-label="Time window">
+      <option value="15">Last 15 min</option>
+      <option value="60" selected>Last hour</option>
+      <option value="360">Last 6 hours</option>
+      <option value="1440">Last 24 hours</option>
+      <option value="10080">Last 7 days</option>
+    </select>
+    <select id="service" aria-label="Service"><option value="">All services</option></select>
+  </div>
+</header>
+
+<main>
+  <section class="kpis">
+    <div class="kpi"><div class="label">Throughput</div><div class="value" id="k-eps">–</div><div class="sub">events / sec avg</div></div>
+    <div class="kpi"><div class="label">Events</div><div class="value" id="k-events">–</div><div class="sub" id="k-services">–</div></div>
+    <div class="kpi"><div class="label">Error rate</div><div class="value" id="k-err">–</div><div class="sub" id="k-5xx">–</div></div>
+    <div class="kpi"><div class="label">p95 latency</div><div class="value" id="k-p95">–</div><div class="sub" id="k-p99">–</div></div>
+    <div class="kpi"><div class="label">Pipeline lag</div><div class="value" id="k-lag">–</div><div class="sub" id="k-lag99">ingest → queryable</div></div>
+  </section>
+
+  <section class="grid2">
+    <div class="panel"><h2>Events &amp; errors</h2><div class="chart"><canvas id="c-events"></canvas></div></div>
+    <div class="panel"><h2>HTTP latency (ms)</h2><div class="chart"><canvas id="c-latency"></canvas></div></div>
+  </section>
+
+  <section class="grid2">
+    <div class="panel scroll"><h2>Services</h2><table id="t-services"></table></div>
+    <div class="panel scroll"><h2>Top routes</h2><table id="t-routes"></table></div>
+  </section>
+
+  <section class="panel">
+    <h2>Search logs</h2>
+    <form class="search" id="search">
+      <input name="q" placeholder="Text in message…" autocomplete="off">
+      <select name="level">
+        <option value="">Any level</option><option>fatal</option><option>error</option><option>warn</option><option>info</option><option>debug</option>
+      </select>
+      <input name="trace_id" placeholder="Trace ID" size="14">
+      <select name="min_status"><option value="0">Any status</option><option value="400">4xx+</option><option value="500">5xx</option></select>
+      <button type="submit">Search</button>
+    </form>
+    <div class="scroll"><table id="t-logs"></table></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = new Intl.NumberFormat();
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+function params(extra = {}) {
+  const p = new URLSearchParams({ minutes: $('window').value, service: $('service').value, ...extra });
+  for (const [k, v] of [...p]) if (v === '' || v === '0') p.delete(k);
+  return p;
+}
+async function api(path, extra) {
+  const res = await fetch(`${path}?${params(extra)}`);
+  if (!res.ok) throw new Error(`${path}: ${res.status}`);
+  return res.json();
+}
+
+const axisColor = () => css('--muted');
+const gridColor = () => css('--border');
+function makeChart(canvas, datasets) {
+  return new Chart(canvas, {
+    type: 'line',
+    data: { labels: [], datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      elements: { point: { radius: 0 }, line: { borderWidth: 2, tension: 0.25 } },
+      plugins: { legend: { labels: { color: axisColor(), boxWidth: 12 } } },
+      scales: {
+        x: { ticks: { color: axisColor(), maxTicksLimit: 8 }, grid: { color: gridColor() } },
+        y: { beginAtZero: true, ticks: { color: axisColor() }, grid: { color: gridColor() } },
+      },
+    },
+  });
+}
+const eventsChart = makeChart($('c-events'), [
+  { label: 'Events', data: [], borderColor: css('--accent'), backgroundColor: css('--accent') },
+  { label: 'Errors', data: [], borderColor: css('--err'), backgroundColor: css('--err') },
+]);
+const latencyChart = makeChart($('c-latency'), [
+  { label: 'p50', data: [], borderColor: css('--ok'), backgroundColor: css('--ok') },
+  { label: 'p95', data: [], borderColor: css('--warn'), backgroundColor: css('--warn') },
+  { label: 'p99', data: [], borderColor: css('--err'), backgroundColor: css('--err') },
+]);
+
+const timeLabel = (t) => {
+  const d = new Date(t.replace(' ', 'T') + 'Z');
+  return Number($('window').value) > 1440
+    ? d.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+    : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+};
+
+async function refreshOverview() {
+  const o = await api('/api/overview');
+  $('k-eps').textContent = fmt.format(o.events_per_sec);
+  $('k-events').textContent = fmt.format(o.events);
+  $('k-services').textContent = `${o.services} service${o.services === 1 ? '' : 's'}`;
+  $('k-err').textContent = `${o.error_rate}%`;
+  $('k-err').className = 'value' + (o.error_rate > 5 ? ' bad' : '');
+  $('k-5xx').textContent = `${o.http_5xx_rate}% of HTTP requests 5xx`;
+  $('k-p95').textContent = `${fmt.format(o.latency_ms.p95)} ms`;
+  $('k-p99').textContent = `p50 ${fmt.format(o.latency_ms.p50)} · p99 ${fmt.format(o.latency_ms.p99)} ms`;
+  $('k-lag').textContent = o.pipeline.recent_events ? `${fmt.format(o.pipeline.lag_p50_ms)} ms` : '–';
+  $('k-lag99').textContent = o.pipeline.recent_events ? `p99 ${fmt.format(o.pipeline.lag_p99_ms)} ms · ingest → queryable` : 'no events in last 5 min';
+}
+
+async function refreshCharts() {
+  const { points, bucket_minutes } = await api('/api/timeseries');
+  const labels = points.map((p) => timeLabel(p.t));
+  const perSec = (n) => +(n / (bucket_minutes * 60)).toFixed(2);
+  eventsChart.data.labels = labels;
+  eventsChart.data.datasets[0].label = 'Events / sec';
+  eventsChart.data.datasets[0].data = points.map((p) => perSec(p.events));
+  eventsChart.data.datasets[1].label = 'Errors / sec';
+  eventsChart.data.datasets[1].data = points.map((p) => perSec(p.errors));
+  eventsChart.update();
+  latencyChart.data.labels = labels;
+  ['p50', 'p95', 'p99'].forEach((k, i) => { latencyChart.data.datasets[i].data = points.map((p) => p.latency_ms[k]); });
+  latencyChart.update();
+}
+
+async function refreshTables() {
+  const [services, routes] = await Promise.all([api('/api/services'), api('/api/routes', { limit: 10 })]);
+  const sel = $('service'); const current = sel.value;
+  const names = services.map((s) => s.service);
+  if (current && !names.includes(current)) names.unshift(current);
+  sel.innerHTML = '<option value="">All services</option>' + names.map((n) => `<option ${n === current ? 'selected' : ''}>${esc(n)}</option>`).join('');
+
+  $('t-services').innerHTML = services.length
+    ? '<tr><th>Service</th><th class="num">Events</th><th class="num">Error %</th><th class="num">p95 ms</th></tr>' +
+      services.map((s) => `<tr><td>${esc(s.service)}</td><td class="num">${fmt.format(s.events)}</td><td class="num ${s.error_rate > 5 ? 'bad' : ''}">${s.error_rate}</td><td class="num">${fmt.format(s.p95_ms)}</td></tr>`).join('')
+    : '<tr><td class="empty">No data yet. Run the load generator.</td></tr>';
+
+  $('t-routes').innerHTML = routes.length
+    ? '<tr><th>Route</th><th class="num">Requests</th><th class="num">5xx %</th><th class="num">p95 ms</th></tr>' +
+      routes.map((r) => `<tr><td><span style="color:var(--muted)">${esc(r.service)}</span> ${esc(r.route)}</td><td class="num">${fmt.format(r.requests)}</td><td class="num ${r.error_rate > 5 ? 'bad' : ''}">${r.error_rate}</td><td class="num">${fmt.format(r.latency_ms.p95)}</td></tr>`).join('')
+    : '<tr><td class="empty">No HTTP traffic yet.</td></tr>';
+}
+
+async function search(e) {
+  e?.preventDefault();
+  const form = Object.fromEntries(new FormData($('search')));
+  const rows = await api('/api/logs', { ...form, limit: 100 });
+  $('t-logs').innerHTML = rows.length
+    ? '<tr><th>Time</th><th>Service</th><th>Level</th><th>Request</th><th>Message</th></tr>' +
+      rows.map((r) => `<tr>
+        <td>${esc(new Date(r.timestamp.replace(' ', 'T') + 'Z').toLocaleTimeString())}</td>
+        <td>${esc(r.service)}</td>
+        <td class="lvl lvl-${esc(r.level)}">${esc(r.level.toUpperCase())}</td>
+        <td>${r.http_status ? `${esc(r.http_method)} ${esc(r.http_path)} <b>${r.http_status}</b> ${r.duration_ms}ms` : ''}</td>
+        <td class="msg">${esc(r.message)}</td></tr>`).join('')
+    : '<tr><td class="empty">No matching logs.</td></tr>';
+}
+
+async function refreshAll() {
+  try {
+    await Promise.all([refreshOverview(), refreshCharts(), refreshTables()]);
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+$('search').addEventListener('submit', (e) => search(e).catch(console.error));
+$('window').addEventListener('change', () => { refreshAll(); search().catch(console.error); });
+$('service').addEventListener('change', () => { refreshAll(); search().catch(console.error); });
+refreshAll(); search().catch(console.error);
+setInterval(refreshAll, 5000);
+</script>
+</body>
+</html>
