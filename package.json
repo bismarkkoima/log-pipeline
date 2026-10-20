@@ -1,0 +1,26 @@
+{
+  "name": "log-pipeline",
+  "version": "0.1.0",
+  "description": "High-throughput log aggregation & analytics pipeline: HTTP ingest -> Kafka -> batched workers -> ClickHouse -> query API + dashboard",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "ingest": "node src/ingest/server.js",
+    "worker": "node src/worker/index.js",
+    "query": "node src/query/server.js",
+    "migrate": "node scripts/migrate.js",
+    "loadgen": "node scripts/loadgen.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@clickhouse/client": "^1.4.0",
+    "ajv": "^8.17.1",
+    "fastify": "^4.28.1",
+    "kafkajs": "^2.2.4",
+    "pino": "^9.3.2",
+    "prom-client": "^15.1.3"
+  }
+}
